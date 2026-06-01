@@ -271,6 +271,7 @@
             display: block;
             width: 100%;
             height: 100%;
+            cursor: grab;
         }
 
         /* 分隔线 */
@@ -553,7 +554,7 @@
                     </div>
                 </div>
                 <!-- 右：Canvas 可视化 -->
-                <div class="canvas-wrap" style="min-height:280px;">
+                <div class="canvas-wrap" style="min-height:360px;">
                     <canvas id="decCanvas"></canvas>
                 </div>
             </div>
@@ -610,7 +611,7 @@
                         </div>
                     </div>
                 </div>
-                <div class="canvas-wrap" style="min-height:280px;">
+                <div class="canvas-wrap" style="min-height:360px;">
                     <canvas id="forceCanvas"></canvas>
                 </div>
             </div>
@@ -706,7 +707,7 @@
 
                 <!-- 右：Canvas + 结果 -->
                 <div>
-                    <div class="canvas-wrap mb-4" style="min-height:260px;">
+                    <div class="canvas-wrap mb-4" style="min-height:360px;">
                         <canvas id="opCanvas"></canvas>
                     </div>
                     <div class="result-box" id="opResult">
@@ -744,6 +745,207 @@
                 setTimeout(() => t.remove(), 300);
             }, 3000);
         }
+
+        // ============ 3D 可视化 ============
+        // 每个模块独立的 3D 旋转视角
+        const view3D = {
+            dec:  { rx: -0.615, ry: 3.927 },  // 等轴测视角 (isometric), Y轴旋转180°
+            force:{ rx: -0.615, ry: 3.927 },
+            ops:  { rx: -0.615, ry: 3.927 }
+        };
+
+        let drag3D = { active: false, module: null, startX: 0, startY: 0, startRx: 0, startRy: 0 };
+
+        // Canvas 尺寸管理（只在初始化和窗口大小变化时更新，避免逐次累积）
+        function resizeAllCanvases() {
+            const ids = ['decCanvas', 'forceCanvas', 'opCanvas'];
+            const dpr = window.devicePixelRatio || 1;
+            ids.forEach(id => {
+                const canvas = document.getElementById(id);
+                if (!canvas) return;
+                const parent = canvas.parentElement;
+                const w = parent.clientWidth;
+                const h = parent.clientHeight;
+                if (w > 0 && h > 0) {
+                    canvas.width = Math.round(w * dpr);
+                    canvas.height = Math.round(h * dpr);
+                }
+            });
+        }
+
+        // 3D → 2D 透视投影
+        function project3D(x, y, z, rx, ry, scale, cx, cy) {
+            // 绕 Y 轴旋转（水平视角）
+            const cosY = Math.cos(ry), sinY = Math.sin(ry);
+            const x1 = x * cosY - z * sinY;
+            const z1 = x * sinY + z * cosY;
+            // 绕 X 轴旋转（垂直视角）
+            const cosX = Math.cos(rx), sinX = Math.sin(rx);
+            const y1 = y * cosX - z1 * sinX;
+            const z2 = y * sinX + z1 * cosX; // 深度值
+            return {
+                sx: cx + x1 * scale,
+                sy: cy - y1 * scale,
+                depth: z2
+            };
+        }
+
+        // 根据深度获取透明度（近处不透明，远处半透明）
+        function depthAlpha(depth, maxComp) {
+            if (maxComp === 0) return 1;
+            const t = Math.max(-1, Math.min(1, depth / maxComp));
+            return 0.65 + 0.35 * (t + 1) / 2; // 0.65 ~ 1.0
+        }
+
+        // 绘制 3D 矢量箭头（与 2D drawArrow 完全一致的样式，仅坐标经 3D 投影）
+        function drawArrow3D(ctx, x1, y1, z1, x2, y2, z2, rx, ry, scale, cx, cy, color, lineWidth) {
+            const p1 = project3D(x1, y1, z1, rx, ry, scale, cx, cy);
+            const p2 = project3D(x2, y2, z2, rx, ry, scale, cx, cy);
+
+            const headLen = 10;
+            const dx = p2.sx - p1.sx, dy = p2.sy - p1.sy;
+            const angle = Math.atan2(dy, dx);
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // 线段
+            ctx.beginPath();
+            ctx.moveTo(p1.sx, p1.sy);
+            ctx.lineTo(p2.sx, p2.sy);
+            ctx.stroke();
+
+            // 箭头
+            ctx.beginPath();
+            ctx.moveTo(p2.sx, p2.sy);
+            ctx.lineTo(p2.sx - headLen * Math.cos(angle - Math.PI / 6), p2.sy - headLen * Math.sin(angle - Math.PI / 6));
+            ctx.moveTo(p2.sx, p2.sy);
+            ctx.lineTo(p2.sx - headLen * Math.cos(angle + Math.PI / 6), p2.sy - headLen * Math.sin(angle + Math.PI / 6));
+            ctx.stroke();
+        }
+
+        // 绘制 3D 虚线
+        function drawDashed3D(ctx, x1, y1, z1, x2, y2, z2, rx, ry, scale, cx, cy, color, maxComp) {
+            const p1 = project3D(x1, y1, z1, rx, ry, scale, cx, cy);
+            const p2 = project3D(x2, y2, z2, rx, ry, scale, cx, cy);
+            const alpha = depthAlpha((p1.depth + p2.depth) / 2, maxComp * scale);
+            ctx.globalAlpha = alpha;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p1.sx, p1.sy);
+            ctx.lineTo(p2.sx, p2.sy);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+        }
+
+        // 绘制 3D 坐标轴（颜色与 2D 坐标轴保持一致）
+        function drawAxes3D(ctx, cx, cy, rx, ry, scale, maxComp, W, H) {
+            const axisLen = maxComp * 1.3;
+            // 低饱和度区分色，与深色主题协调
+            const axisColors = { X: '#d08484', Y: '#84c490', Z: '#8490c8' };
+
+            const axes = [
+                { from:[0,0,0], to:[axisLen,0,0], label:'X', color:axisColors.X },
+                { from:[0,0,0], to:[0,axisLen,0], label:'Y', color:axisColors.Y },
+                { from:[0,0,0], to:[0,0,axisLen], label:'Z', color:axisColors.Z },
+            ];
+
+            // 按深度排序（远处先画）
+            axes.sort((a, b) => {
+                const ma = project3D((a.from[0]+a.to[0])/2, (a.from[1]+a.to[1])/2, (a.from[2]+a.to[2])/2, rx, ry, scale, cx, cy);
+                const mb = project3D((b.from[0]+b.to[0])/2, (b.from[1]+b.to[1])/2, (b.from[2]+b.to[2])/2, rx, ry, scale, cx, cy);
+                return ma.depth - mb.depth;
+            });
+
+            axes.forEach(axis => {
+                const p1 = project3D(axis.from[0], axis.from[1], axis.from[2], rx, ry, scale, cx, cy);
+                const p2 = project3D(axis.to[0], axis.to[1], axis.to[2], rx, ry, scale, cx, cy);
+                const alpha = depthAlpha((p1.depth + p2.depth) / 2, maxComp * scale);
+
+                // 正半轴
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = axis.color;
+                ctx.lineWidth = 1.8;
+                ctx.beginPath();
+                ctx.moveTo(p1.sx, p1.sy);
+                ctx.lineTo(p2.sx, p2.sy);
+                ctx.stroke();
+
+                // 负半轴（虚线）
+                ctx.setLineDash([3, 5]);
+                ctx.strokeStyle = axis.color;
+                ctx.lineWidth = 0.8;
+                ctx.globalAlpha = alpha * 0.4;
+                ctx.beginPath();
+                ctx.moveTo(p1.sx, p1.sy);
+                const neg = project3D(-axis.to[0] * 0.35, -axis.to[1] * 0.35, -axis.to[2] * 0.35, rx, ry, scale, cx, cy);
+                ctx.lineTo(neg.sx, neg.sy);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // 标签
+                ctx.globalAlpha = alpha;
+                const lp = project3D(axis.to[0] * 1.12, axis.to[1] * 1.12, axis.to[2] * 1.12, rx, ry, scale, cx, cy);
+                ctx.fillStyle = axis.color;
+                ctx.font = 'bold 12px "JetBrains Mono"';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(axis.label, lp.sx, lp.sy);
+                ctx.globalAlpha = 1;
+            });
+        }
+
+        // 设置 3D 轨道旋转交互
+        function setupOrbitControl(canvas, moduleName) {
+            canvas.addEventListener('mousedown', (e) => {
+                drag3D.active = true;
+                drag3D.module = moduleName;
+                drag3D.startX = e.clientX;
+                drag3D.startY = e.clientY;
+                drag3D.startRx = view3D[moduleName].rx;
+                drag3D.startRy = view3D[moduleName].ry;
+                canvas.style.cursor = 'grabbing';
+                e.preventDefault();
+            });
+
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                // 缩放通过调整 scale 实现，这里暂不处理
+            }, { passive: false });
+        }
+
+        document.addEventListener('mousemove', (e) => {
+            if (!drag3D.active || !drag3D.module) return;
+            const dx = e.clientX - drag3D.startX;
+            const dy = e.clientY - drag3D.startY;
+            view3D[drag3D.module].ry = drag3D.startRy + dx * 0.008;
+            view3D[drag3D.module].rx = drag3D.startRx - dy * 0.008;
+            // 限制垂直角度，防止翻转
+            view3D[drag3D.module].rx = Math.max(-1.4, Math.min(1.4, view3D[drag3D.module].rx));
+            // 重新绘制对应模块
+            if (currentDim === '3d') {
+                if (drag3D.module === 'dec') calcDecompose();
+                else if (drag3D.module === 'force') calcForce();
+                else if (drag3D.module === 'ops') calcOps();
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (drag3D.active) {
+                const canvases = ['decCanvas', 'forceCanvas', 'opCanvas'];
+                canvases.forEach(id => {
+                    const c = document.getElementById(id);
+                    if (c) c.style.cursor = 'grab';
+                });
+            }
+            drag3D.active = false;
+            drag3D.module = null;
+        });
 
         // ============ 维度切换 ============
         function setDimension(dim) {
@@ -813,15 +1015,18 @@
 
         function drawDecCanvas(x, y, z) {
             const canvas = document.getElementById('decCanvas');
-            const rect = canvas.parentElement.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
+            // 仅在尺寸变化时更新 canvas 缓冲区（避免每次绘制都读取 getBoundingClientRect 造成累积）
+            const parent = canvas.parentElement;
+            const pw = parent.clientWidth, ph = parent.clientHeight;
+            const tw = Math.round(pw * dpr), th = Math.round(ph * dpr);
+            if (tw > 0 && th > 0 && (canvas.width !== tw || canvas.height !== th)) {
+                canvas.width = tw;
+                canvas.height = th;
+            }
             const ctx = canvas.getContext('2d');
-            ctx.scale(dpr, dpr);
-            const W = rect.width, H = rect.height;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            const W = pw, H = ph;
 
             // 清除
             ctx.clearRect(0, 0, W, H);
@@ -831,6 +1036,52 @@
             const maxComp = Math.max(Math.abs(x), Math.abs(y), currentDim === '3d' ? Math.abs(z) : 0, 1);
             const scale = Math.min(W, H) * 0.32 / maxComp;
 
+            // ===== 3D 模式 =====
+            if (currentDim === '3d') {
+                const v = view3D.dec;
+                const rx = v.rx, ry = v.ry;
+
+                // XZ 平面网格
+                ctx.strokeStyle = 'rgba(30,45,77,0.5)';
+                ctx.lineWidth = 0.5;
+                const gs = scale;
+                for (let i = -8; i <= 8; i++) {
+                    ctx.setLineDash(i === 0 ? [] : [3, 6]);
+                    // X方向
+                    const gx1 = project3D(i * gs, 0, -8 * gs, rx, ry, 1, cx, cy);
+                    const gx2 = project3D(i * gs, 0, 8 * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gx1.sx, gx1.sy); ctx.lineTo(gx2.sx, gx2.sy); ctx.stroke();
+                    // Z方向
+                    const gz1 = project3D(-8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    const gz2 = project3D(8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gz1.sx, gz1.sy); ctx.lineTo(gz2.sx, gz2.sy); ctx.stroke();
+                }
+                ctx.setLineDash([]);
+
+                // 3D 坐标轴
+                drawAxes3D(ctx, cx, cy, rx, ry, scale, maxComp, W, H);
+
+                // 矢量箭头
+                drawArrow3D(ctx, 0, 0, 0, x, y, z, rx, ry, scale, cx, cy, '#00e5a0', 2.5);
+
+                // 到 XZ 平面的投影虚线
+                drawDashed3D(ctx, x, y, z, x, 0, z, rx, ry, scale, cx, cy, 'rgba(0,229,160,0.3)', maxComp);
+                // 到各轴的投影虚线（使用统一的辅助线颜色）
+                drawDashed3D(ctx, x, 0, z, x, 0, 0, rx, ry, scale, cx, cy, 'rgba(107,122,150,0.2)', maxComp);
+                drawDashed3D(ctx, x, 0, z, 0, 0, z, rx, ry, scale, cx, cy, 'rgba(107,122,150,0.2)', maxComp);
+                drawDashed3D(ctx, x, y, z, 0, y, 0, rx, ry, scale, cx, cy, 'rgba(107,122,150,0.2)', maxComp);
+
+                // 分量标签
+                ctx.font = '11px "JetBrains Mono"';
+                const mp = project3D(x / 2, y / 2, z / 2, rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#00e5a0';
+                ctx.textAlign = 'center';
+                ctx.fillText('(' + x.toFixed(1) + ',' + y.toFixed(1) + ',' + z.toFixed(1) + ')', mp.sx, mp.sy - 10);
+
+                return;
+            }
+
+            // ===== 2D 模式 =====
             // 绘制网格
             ctx.strokeStyle = 'rgba(30,45,77,0.5)';
             ctx.lineWidth = 0.5;
@@ -888,7 +1139,7 @@
             ctx.restore();
 
             // 角度弧
-            if (currentDim === '2d' && (x !== 0 || y !== 0)) {
+            if (x !== 0 || y !== 0) {
                 let angle = Math.atan2(y, x);
                 let arcR = Math.min(30, scale * maxComp * 0.4);
                 ctx.beginPath();
@@ -932,21 +1183,81 @@
 
         function drawForceCanvas(Fx, Fy, Fz) {
             const canvas = document.getElementById('forceCanvas');
-            const rect = canvas.parentElement.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
+            const parent = canvas.parentElement;
+            const pw = parent.clientWidth, ph = parent.clientHeight;
+            const tw = Math.round(pw * dpr), th = Math.round(ph * dpr);
+            if (tw > 0 && th > 0 && (canvas.width !== tw || canvas.height !== th)) {
+                canvas.width = tw;
+                canvas.height = th;
+            }
             const ctx = canvas.getContext('2d');
-            ctx.scale(dpr, dpr);
-            const W = rect.width, H = rect.height;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            const W = pw, H = ph;
             ctx.clearRect(0, 0, W, H);
 
             const cx = W / 2, cy = H / 2;
             const maxComp = Math.max(Math.abs(Fx), Math.abs(Fy), currentDim === '3d' ? Math.abs(Fz) : 0, 1);
             const scale = Math.min(W, H) * 0.3 / maxComp;
 
+            // ===== 3D 模式 =====
+            if (currentDim === '3d') {
+                const v = view3D.force;
+                const rx = v.rx, ry = v.ry;
+
+                // XZ 平面网格
+                ctx.strokeStyle = 'rgba(30,45,77,0.5)';
+                ctx.lineWidth = 0.5;
+                const gs = scale;
+                for (let i = -8; i <= 8; i++) {
+                    ctx.setLineDash(i === 0 ? [] : [3, 6]);
+                    const gx1 = project3D(i * gs, 0, -8 * gs, rx, ry, 1, cx, cy);
+                    const gx2 = project3D(i * gs, 0, 8 * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gx1.sx, gx1.sy); ctx.lineTo(gx2.sx, gx2.sy); ctx.stroke();
+                    const gz1 = project3D(-8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    const gz2 = project3D(8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gz1.sx, gz1.sy); ctx.lineTo(gz2.sx, gz2.sy); ctx.stroke();
+                }
+                ctx.setLineDash([]);
+
+                // 3D 坐标轴
+                drawAxes3D(ctx, cx, cy, rx, ry, scale, maxComp, W, H);
+
+                // 合力矢量
+                drawArrow3D(ctx, 0, 0, 0, Fx, Fy, Fz, rx, ry, scale, cx, cy, '#00c8d4', 2.5);
+                // X 分力
+                drawArrow3D(ctx, 0, 0, 0, Fx, 0, 0, rx, ry, scale, cx, cy, '#00e5a0', 1.8);
+                // Y 分力
+                drawArrow3D(ctx, 0, 0, 0, 0, Fy, 0, rx, ry, scale, cx, cy, '#ffc24a', 1.8);
+                // Z 分力（暖色调，与蓝色 Z 轴区分）
+                drawArrow3D(ctx, 0, 0, 0, 0, 0, Fz, rx, ry, scale, cx, cy, '#c89860', 1.8);
+
+                // 投影虚线（分量到合力端点）
+                drawDashed3D(ctx, Fx, 0, 0, Fx, Fy, 0, rx, ry, scale, cx, cy, 'rgba(0,229,160,0.3)', maxComp);
+                drawDashed3D(ctx, Fx, Fy, 0, Fx, Fy, Fz, rx, ry, scale, cx, cy, 'rgba(0,200,212,0.3)', maxComp);
+                drawDashed3D(ctx, 0, Fy, 0, Fx, Fy, 0, rx, ry, scale, cx, cy, 'rgba(255,194,74,0.3)', maxComp);
+                drawDashed3D(ctx, 0, 0, Fz, Fx, Fy, Fz, rx, ry, scale, cx, cy, 'rgba(200,152,96,0.25)', maxComp);
+
+                // 标签
+                ctx.font = '11px "JetBrains Mono"';
+                const fp = project3D(Fx / 2, Fy / 2, Fz / 2, rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#00c8d4';
+                ctx.textAlign = 'center';
+                ctx.fillText('F', fp.sx, fp.sy - 10);
+                const fxp = project3D(Fx / 2, 0, 0, rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#00e5a0';
+                ctx.fillText('Fx', fxp.sx, fxp.sy + 16);
+                const fyp = project3D(0, Fy / 2, 0, rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#ffc24a';
+                ctx.fillText('Fy', fyp.sx - 18, fyp.sy);
+                const fzp = project3D(0, 0, Fz / 2, rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#c89860';
+                ctx.fillText('Fz', fzp.sx - 18, fzp.sy);
+
+                return;
+            }
+
+            // ===== 2D 模式 =====
             // 网格
             ctx.strokeStyle = 'rgba(30,45,77,0.5)';
             ctx.lineWidth = 0.5;
@@ -1125,22 +1436,98 @@
 
         function drawOpCanvas(a, b, op) {
             const canvas = document.getElementById('opCanvas');
-            const rect = canvas.parentElement.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
+            const parent = canvas.parentElement;
+            const pw = parent.clientWidth, ph = parent.clientHeight;
+            const tw = Math.round(pw * dpr), th = Math.round(ph * dpr);
+            if (tw > 0 && th > 0 && (canvas.width !== tw || canvas.height !== th)) {
+                canvas.width = tw;
+                canvas.height = th;
+            }
             const ctx = canvas.getContext('2d');
-            ctx.scale(dpr, dpr);
-            const W = rect.width, H = rect.height;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            const W = pw, H = ph;
             ctx.clearRect(0, 0, W, H);
 
             const cx = W / 2, cy = H / 2;
             const allComps = [...a, ...b];
-            const maxComp = Math.max(...allComps.map(Math.abs), 1);
+            let extraComps = [];
+            if (op === 'add') extraComps = vecAdd(a, b);
+            else if (op === 'sub') extraComps = vecSub(a, b);
+            else if (op === 'cross' && currentDim === '3d') extraComps = vecCross(a, b);
+            const maxComp = Math.max(...allComps.map(Math.abs), ...extraComps.map(Math.abs), 1);
             const scale = Math.min(W, H) * 0.28 / maxComp;
 
+            // ===== 3D 模式 =====
+            if (currentDim === '3d') {
+                const v = view3D.ops;
+                const rx = v.rx, ry = v.ry;
+
+                // XZ 平面网格
+                ctx.strokeStyle = 'rgba(30,45,77,0.5)';
+                ctx.lineWidth = 0.5;
+                const gs = scale;
+                for (let i = -8; i <= 8; i++) {
+                    ctx.setLineDash(i === 0 ? [] : [3, 6]);
+                    const gx1 = project3D(i * gs, 0, -8 * gs, rx, ry, 1, cx, cy);
+                    const gx2 = project3D(i * gs, 0, 8 * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gx1.sx, gx1.sy); ctx.lineTo(gx2.sx, gx2.sy); ctx.stroke();
+                    const gz1 = project3D(-8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    const gz2 = project3D(8 * gs, 0, i * gs, rx, ry, 1, cx, cy);
+                    ctx.beginPath(); ctx.moveTo(gz1.sx, gz1.sy); ctx.lineTo(gz2.sx, gz2.sy); ctx.stroke();
+                }
+                ctx.setLineDash([]);
+
+                // 3D 坐标轴
+                drawAxes3D(ctx, cx, cy, rx, ry, scale, maxComp, W, H);
+
+                // 矢量 A
+                const a3 = a.length === 3 ? a : [a[0], a[1], 0];
+                const b3 = b.length === 3 ? b : [b[0], b[1], 0];
+
+                if (op === 'add') {
+                    const r = vecAdd(a3, b3);
+                    drawArrow3D(ctx, 0,0,0, a3[0],a3[1],a3[2], rx,ry,scale,cx,cy,'#00e5a0',2.2);
+                    drawArrow3D(ctx, 0,0,0, b3[0],b3[1],b3[2], rx,ry,scale,cx,cy,'#ff8a5c',2.2);
+                    drawArrow3D(ctx, 0,0,0, r[0],r[1],r[2], rx,ry,scale,cx,cy,'#00c8d4',2.5);
+                    drawDashed3D(ctx, a3[0],a3[1],a3[2], r[0],r[1],r[2], rx,ry,scale,cx,cy,'rgba(0,200,212,0.3)',maxComp);
+                    drawDashed3D(ctx, b3[0],b3[1],b3[2], r[0],r[1],r[2], rx,ry,scale,cx,cy,'rgba(0,200,212,0.3)',maxComp);
+                } else if (op === 'sub') {
+                    const r = vecSub(a3, b3);
+                    drawArrow3D(ctx, 0,0,0, a3[0],a3[1],a3[2], rx,ry,scale,cx,cy,'#00e5a0',2.2);
+                    drawArrow3D(ctx, 0,0,0, b3[0],b3[1],b3[2], rx,ry,scale,cx,cy,'#ff8a5c',2.2);
+                    drawArrow3D(ctx, 0,0,0, r[0],r[1],r[2], rx,ry,scale,cx,cy,'#00c8d4',2.5);
+                    drawDashed3D(ctx, b3[0],b3[1],b3[2], r[0],r[1],r[2], rx,ry,scale,cx,cy,'rgba(0,200,212,0.3)',maxComp);
+                } else if (op === 'cross') {
+                    const r = vecCross(a3, b3);
+                    drawArrow3D(ctx, 0,0,0, a3[0],a3[1],a3[2], rx,ry,scale,cx,cy,'#00e5a0',2.2);
+                    drawArrow3D(ctx, 0,0,0, b3[0],b3[1],b3[2], rx,ry,scale,cx,cy,'#ff8a5c',2.2);
+                    drawArrow3D(ctx, 0,0,0, r[0],r[1],r[2], rx,ry,scale,cx,cy,'#00c8d4',2.5);
+                    // 垂直关系指示：从叉积端点到 AB 平面的投影
+                    drawDashed3D(ctx, r[0],r[1],r[2], 0,0,0, rx,ry,scale,cx,cy,'rgba(0,200,212,0.2)',maxComp);
+                } else if (op === 'dot' || op === 'angle') {
+                    drawArrow3D(ctx, 0,0,0, a3[0],a3[1],a3[2], rx,ry,scale,cx,cy,'#00e5a0',2.2);
+                    drawArrow3D(ctx, 0,0,0, b3[0],b3[1],b3[2], rx,ry,scale,cx,cy,'#ff8a5c',2.2);
+                } else if (op === 'magA') {
+                    drawArrow3D(ctx, 0,0,0, a3[0],a3[1],a3[2], rx,ry,scale,cx,cy,'#00e5a0',2.5);
+                } else if (op === 'magB') {
+                    drawArrow3D(ctx, 0,0,0, b3[0],b3[1],b3[2], rx,ry,scale,cx,cy,'#ff8a5c',2.5);
+                }
+
+                // 标签
+                ctx.font = '11px "JetBrains Mono"';
+                const pa = project3D(a3[0], a3[1], a3[2], rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#00e5a0';
+                ctx.textAlign = 'left';
+                ctx.fillText('A', pa.sx + 6, pa.sy - 6);
+                const pb = project3D(b3[0], b3[1], b3[2], rx, ry, scale, cx, cy);
+                ctx.fillStyle = '#ff8a5c';
+                ctx.fillText('B', pb.sx + 6, pb.sy - 6);
+
+                return;
+            }
+
+            // ===== 2D 模式 =====
             // 网格
             ctx.strokeStyle = 'rgba(30,45,77,0.5)';
             ctx.lineWidth = 0.5;
@@ -1260,6 +1647,7 @@
 
         // ============ 窗口调整 ============
         function onResize() {
+            resizeAllCanvases();
             calcDecompose();
             calcForce();
             calcOps();
@@ -1268,6 +1656,11 @@
         // ============ 初始化 ============
         window.addEventListener('load', () => {
             createParticles();
+            resizeAllCanvases();
+            // 设置 3D 轨道旋转交互
+            setupOrbitControl(document.getElementById('decCanvas'), 'dec');
+            setupOrbitControl(document.getElementById('forceCanvas'), 'force');
+            setupOrbitControl(document.getElementById('opCanvas'), 'ops');
             calcDecompose();
             calcForce();
             calcOps();
